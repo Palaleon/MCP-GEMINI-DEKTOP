@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+*.bak.js
+*.old
+.gemini-mcp.log
+.gemini-mcp-launcher.log
+.gemini-mcp-token
