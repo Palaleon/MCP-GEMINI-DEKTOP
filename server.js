@@ -12,7 +12,7 @@ const { StreamableHTTPServerTransport } =
   require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { z } = require("zod");
 
-// ---------------------------------------------------------------- Colores ANSI para Consola
+// ---------------------------------------------------------------- Colores ANSI
 const C = {
   reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
   red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m",
@@ -20,7 +20,7 @@ const C = {
 };
 
 // ---------------------------------------------------------------- Config
-const VERSION = "3.3.0"; // Version con Autonomia Total y Rationale
+const VERSION = "3.4.0"; // Claude Code Parity
 const ROOT = path.resolve(process.env.MCP_ROOT || "C:\\Users\\ASD\\Documents\\proyectos");
 const PORT = 3000;
 const MAX_READ_BYTES = 20 * 1024 * 1024;   
@@ -51,7 +51,7 @@ function tokenOk(candidate) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-// Log de llamadas (fuera de la carpeta autorizada).
+// Log de llamadas
 const LOG_FILE = path.join(os.homedir(), ".gemini-mcp.log");
 function log(msg) {
   try {
@@ -63,17 +63,15 @@ function log(msg) {
 }
 function summarizeArgs(args) {
   try {
-    // Evitamos imprimir el contenido gigante o el rationale que ya se muestra arriba
     const clone = { ...args };
     delete clone.rationale; 
-    return JSON.stringify(clone, (k, v) => (k === "content" ? `<${String(v).length} chars>` : v)).slice(0, 300);
+    return JSON.stringify(clone, (k, v) => (k === "content" || k === "newContent" ? `<${String(v).length} chars>` : v)).slice(0, 300);
   } catch { return "?"; }
 }
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-// Secreto en la ruta: /mcp/<token>
 app.use((req, res, next) => {
   const m = req.url.match(/^\/mcp\/([^/?]+)/);
   if (m) {
@@ -127,7 +125,7 @@ async function safeExisting(relativePath) {
     }
   }
   const rn = path.basename(REAL_ROOT);
-  throw new Error(`La ruta "${raw}" no existe. Las rutas son relativas a la carpeta raiz "${rn}" ('.' es la raiz).`);
+  throw new Error(`La ruta "${raw}" no existe. Rutas relativas a la carpeta raiz "${rn}" ('.' es la raiz).`);
 }
 
 async function safeNew(relativePath) {
@@ -215,12 +213,15 @@ const CMD = { readOnlyHint: false, destructiveHint: true, idempotentHint: false,
 const STARTED = Date.now();
 
 const INSTRUCTIONS = [
-  "Servidor MCP con acceso REAL a la PC del usuario (Windows). Usa estas herramientas directamente, sin que el usuario te nombre la herramienta; no digas que no tienes acceso sin intentarlo primero.",
-  "Archivos: rutas relativas a la carpeta raiz ('.' es la raiz; no antepongas el nombre de la raiz). Explora con directory_tree / list_files / search_in_files, lee con read_file (por partes con offset y limit), edita con edit_file.",
-  "Comandos: run_command ejecuta PowerShell (no bash) y termina en maximo 90 s. Para instalaciones, servidores o procesos largos usa start_background_command y luego read_background_output.",
-  "Un exit code 0 significa EXITO aunque haya texto en stderr (git y npm escriben avisos ahi). Los errores de estas herramientas son de la llamada, no del servidor: lee el mensaje, corrige y reintenta antes de rendirte.",
-  "NOVEDAD PRO (v3.3.0): Autonomia Total. Los comandos ya no te pediran confirmacion. Ejecuta lo que tengas que ejecutar bajo tu propio criterio.",
-  "NOVEDAD PRO (v3.3.0): Las herramientas de modificacion ahora piden un campo 'rationale'. Explica brevemente por que haces ese cambio."
+  "ERES UN AGENTE AUTÓNOMO CON ACCESO REAL A LA PC DEL USUARIO (Windows).",
+  "Usa las herramientas directamente. NUNCA digas que no tienes acceso sin intentarlo primero.",
+  "Reglas Principales:",
+  "1. AL INICIAR UN CHAT NUEVO: Llama SIEMPRE a 'get_project_context' para orientarte en el proyecto actual. No preguntes de que trata el proyecto, averigualo tu mismo.",
+  "2. ANTES DE ACCIONES GRANDES: Llama SIEMPRE a 'console_message' para imprimir tus tareas en la pantalla del usuario a color y mantenerlo informado.",
+  "3. BUSQUEDA INTELIGENTE: Usa 'search_in_files' que ahora te devuelve bloques de contexto (AST-like) en vez de lineas sueltas.",
+  "4. EDICION QUIRURGICA: Usa 'patch_file' para reemplazar lineas exactas de codigo sin lidiar con los problemas de espacios de 'edit_file'.",
+  "5. COMANDOS AUTONOMOS: Usa 'run_command' para git, npm, o powershell. Tienes autonomia total. NO NECESITAS PEDIR PERMISO. Exito = exit code 0.",
+  "6. TRANSPARENCIA OBLIGATORIA: En herramientas de modificacion, completa siempre el campo 'rationale' para que el usuario sepa por que haces eso."
 ].join("\n");
 
 function stripStderrRedirect(cmd) {
@@ -293,18 +294,10 @@ let backgroundSeq = 0;
 
 function hintFor({ command, code, timedOut, secs, out, err }) {
   const all = out + "\n" + err;
-  if (timedOut) return `El comando tardo mas de ${secs}s y se detuvo. Si es algo largo, usa start_background_command.`;
-  if (/git\s+commit/i.test(command || "") && /nothing to commit|nada para hacer commit/i.test(all)) return "No habia cambios para commitear. No es un fallo real.";
-  if (/pathspec .* did not match|did not match any file/i.test(all)) return "Git no encontro esa rama, archivo o ruta.";
-  if (/index\.lock/i.test(all)) return "Hay un .git/index.lock colgado. Confirma que no corre otro git y borra el archivo.";
-  if (/no se reconoce como nombre de un cmdlet|is not recognized as the name/i.test(all)) return "Ese comando no existe en PowerShell o no esta en el PATH.";
-  if (/Authentication failed|Permission denied/i.test(all)) return "Git necesita credenciales interactivas.";
-  if (/EADDRINUSE|address already in use/i.test(all)) return "El puerto ya esta en uso.";
-  if (/Acceso denegado|Access is denied|EPERM|EBUSY|being used/i.test(all)) return "Windows niega el acceso o el archivo esta en uso.";
-  if (/ENOENT|cannot find path|no existe/i.test(all)) return "Ruta no existe. Verifica con list_files.";
-  if (/npm ERR!/i.test(all)) return "npm fallo: revisa las primeras lineas 'npm ERR!'.";
-  if (code === 0 && err.trim()) return "Exit code 0 = EXITO. El texto de stderr son avisos. No es fallo.";
-  if (code !== 0) return `Exit code ${code}. Lee la salida, corrige y reintenta.`;
+  if (timedOut) return `Timeout tras ${secs}s. Usa start_background_command para procesos largos.`;
+  if (/git\s+commit/i.test(command || "") && /nothing to commit/i.test(all)) return "No habia cambios para commitear.";
+  if (/EADDRINUSE/i.test(all)) return "El puerto ya esta en uso.";
+  if (code === 0 && err.trim()) return "Exit code 0 = EXITO. El stderr son avisos.";
   return "";
 }
 
@@ -312,33 +305,22 @@ function formatRun({ command, code, timedOut, ms, cwd, out, err, secs }) {
   const status = timedOut ? "TIMEOUT" : code === 0 ? "OK" : "ERROR";
   const o = tailText(out).trim();
   const e = tailText(err, 20000).trim();
-  let t = `[${status}] ${timedOut ? "cortado por timeout" : "exit code " + (code === null ? "?" : code)} | ${(ms / 1000).toFixed(1)}s | carpeta: ${cwd}\n`;
-  if (o) t += `\n--- salida ---\n${o}\n`;
+  let t = `[${status}] ${timedOut ? "timeout" : "exit code " + code} | ${(ms / 1000).toFixed(1)}s | cwd: ${cwd}\n`;
+  if (o) t += `\n--- stdout ---\n${o}\n`;
   if (e) t += `\n--- stderr ---\n${e}\n`;
-  if (!o && !e) t += "\n(el comando no imprimio nada)\n";
+  if (!o && !e) t += "\n(sin salida)\n";
   const h = hintFor({ command, code, timedOut, secs, out: o, err: e });
   if (h) t += `\nPISTA: ${h}\n`;
   return t;
 }
 
 function friendlyError(e) {
-  const m = e && e.message ? e.message : String(e);
-  const byCode = {
-    ENOENT: "Esa ruta no existe. Usa list_files, directory_tree o search_files.",
-    EACCES: "Windows niega el permiso.",
-    EPERM: "Windows niega el permiso.",
-    EBUSY: "El archivo esta en uso.",
-    EISDIR: "Eso es una carpeta, usa list_files.",
-    ENOTDIR: "Una parte de la ruta no es una carpeta."
-  };
-  let out = "ERROR en la herramienta: " + m;
-  const hint = e && byCode[e.code];
-  if (hint) out += "\nQue hacer: " + hint;
-  out += "\n(Error de ESTA llamada, ajusta y reintenta.)";
+  let out = "ERROR en la herramienta: " + (e.message || String(e));
+  out += "\n(Error de ESTA llamada, ajusta parametros y reintenta.)";
   return out;
 }
 
-// ---------------------------------------------------------------- Playwright (Ojos)
+// ---------------------------------------------------------------- Playwright
 let pw = null;
 let pwBrowser = null;
 let pwPage = null;
@@ -366,7 +348,7 @@ function createServer() {
     const t0 = Date.now();
     const args = config.inputSchema && Object.keys(config.inputSchema).length ? a[0] : {};
     
-    // Log Interceptor con Rationale
+    // Log Interceptor a la consola
     if (name !== "console_message") {
       console.log(`\n${C.cyan}▶ LLAMANDO HERRAMIENTA:${C.reset} ${C.bold}${name}${C.reset}`);
       if (args.rationale) {
@@ -379,31 +361,25 @@ function createServer() {
       const r = await handler(...a);
       const ms = Date.now() - t0;
       if (name !== "console_message") {
-        if (r && r.isError) {
-          console.log(`${C.red}✖ ERROR EN ${name} (${ms}ms)${C.reset}`);
-        } else {
-          console.log(`${C.green}✔ OK ${name} (${ms}ms)${C.reset}`);
-        }
+        if (r && r.isError) console.log(`${C.red}✖ ERROR EN ${name} (${ms}ms)${C.reset}`);
+        else console.log(`${C.green}✔ OK ${name} (${ms}ms)${C.reset}`);
       }
       log(`tool ${name} ${r && r.isError ? "ERROR" : "ok"} ${ms}ms ${summarizeArgs(args)}`);
       return r;
     } catch (e) {
       const ms = Date.now() - t0;
       console.log(`${C.red}✖ EXCEPCION EN ${name} (${ms}ms): ${e.message}${C.reset}`);
-      log(`tool ${name} EXCEPCION ${ms}ms ${summarizeArgs(args)} -> ${e.message}`);
+      log(`tool ${name} EXCEPCION ${ms}ms -> ${e.message}`);
       return result(friendlyError(e), true);
     }
   });
 
-  // --- Herramienta de Interfaz y Razonamiento ---
+  // --- Herramientas de IA y Proyecto (Claude Code Parity) ---
   server.registerTool("console_message", {
-    description: "Imprime tu razonamiento y el estado de tus tareas en la consola del usuario a todo color.",
+    description: "Imprime tu razonamiento y tareas en la consola del usuario a todo color.",
     inputSchema: {
-      thought: z.string().describe("Tu pensamiento actual o lo que estas haciendo"),
-      tasks: z.array(z.object({
-        task: z.string(),
-        status: z.enum(["completada", "en proceso", "pendiente"])
-      })).optional()
+      thought: z.string().describe("Tu pensamiento o explicacion"),
+      tasks: z.array(z.object({ task: z.string(), status: z.enum(["completada", "en proceso", "pendiente"]) })).optional()
     },
     annotations: RO
   }, async ({ thought, tasks }) => {
@@ -421,97 +397,61 @@ function createServer() {
     }
     console.log(`${C.cyan}💭 Pensamiento: ${C.white}${thought}${C.reset}`);
     console.log(`${C.magenta}${C.bold}======================================${C.reset}\n`);
-    return result("Mensaje mostrado en la consola exitosamente.");
+    return result("Mensaje mostrado.");
   });
 
-  // --- Playwright Tools ---
-  server.registerTool("browser_navigate", {
-    description: "Abre una URL en el navegador visible (Playwright).",
-    inputSchema: { url: z.string(), rationale: z.string().optional() },
-    annotations: RO
-  }, async ({ url }) => {
-    const page = await getBrowser();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-    return result(`Navegado a ${url}. Título: ${await page.title()}`);
-  });
-
-  server.registerTool("browser_evaluate", {
-    description: "Ejecuta JS en el navegador.",
-    inputSchema: { script: z.string(), rationale: z.string().optional() },
-    annotations: RO
-  }, async ({ script }) => {
-    const page = await getBrowser();
-    const res = await page.evaluate(script);
-    return result(res);
-  });
-
-  server.registerTool("browser_click", {
-    description: "Hace clic en un elemento.",
-    inputSchema: { selector: z.string(), rationale: z.string().describe("Razón de la interacción") },
-    annotations: WR
-  }, async ({ selector }) => {
-    const page = await getBrowser();
-    await page.click(selector, { timeout: 10000 });
-    return result(`Clic exitoso en ${selector}`);
-  });
-
-  server.registerTool("browser_close", {
-    description: "Cierra el navegador.",
+  server.registerTool("get_project_context", {
+    description: "Llamala al iniciar. Extrae la estructura raiz, package.json, y reglas (.geminirules.md) para que entiendas el proyecto sin preguntar.",
     inputSchema: { rationale: z.string().optional() },
-    annotations: WR
+    annotations: RO
   }, async () => {
-    if (pwBrowser) {
-      await pwBrowser.close();
-      pwBrowser = null;
-      pwPage = null;
-      console.log(`${C.yellow}▶ Navegador cerrado.${C.reset}`);
-      return result("Navegador cerrado.");
+    let ctx = "============================\nCONTEXTO GLOBAL DEL PROYECTO\n============================\n\n";
+    try {
+      const dirs = (await fs.readdir(REAL_ROOT, {withFileTypes: true}))
+                   .filter(d=>d.isDirectory() && !IGNORE_DIRS.has(d.name))
+                   .map(d=>d.name);
+      ctx += `[Carpetas Raíz]: ${dirs.join(", ")}\n\n`;
+    } catch(e){}
+    try {
+      const pkg = JSON.parse(await fs.readFile(path.join(REAL_ROOT, "package.json"), "utf8"));
+      ctx += `[package.json -> Dependencias]: ${Object.keys(pkg.dependencies||{}).join(", ")}\n`;
+      ctx += `[package.json -> Scripts]: ${Object.keys(pkg.scripts||{}).join(", ")}\n\n`;
+    } catch(e) {}
+    for (const ruleFile of [".geminirules.md", ".cursorrules", "README.md"]) {
+      try {
+        const rules = await fs.readFile(path.join(REAL_ROOT, ruleFile), "utf8");
+        ctx += `--- Contenido de ${ruleFile} ---\n${rules.slice(0, 1500)}\n\n`;
+      } catch(e) {}
     }
-    return result("El navegador no estaba abierto.");
+    return result(ctx || "Proyecto vacio o sin metadatos estandar.");
   });
 
-  // --- Archivos ---
-  server.registerTool("list_files", {
-    description: "Lista archivos y carpetas",
-    inputSchema: { path: z.string().optional() },
-    annotations: RO
-  }, async ({ path: p = "." }) => {
-    const dir = await safeExisting(p);
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    const lines = [];
-    for (const e of entries.slice(0, 500)) {
-      if (e.isDirectory()) { lines.push(`[DIR]  ${e.name}`); continue; }
-      let size = "";
-      try { size = ` (${(await fs.stat(path.join(dir, e.name))).size} bytes)`; } catch {}
-      lines.push(`[FILE] ${e.name}${size}`);
+  // --- Archivos (Edicion Quirurgica) ---
+  server.registerTool("patch_file", {
+    description: "Reemplaza un bloque exacto de lineas en un archivo. Mejor que edit_file para codigo.",
+    inputSchema: {
+      path: z.string(),
+      startLine: z.number().describe("Linea inicial a borrar/reemplazar (inclusive, desde 1)"),
+      endLine: z.number().describe("Linea final a borrar/reemplazar (inclusive, desde 1)"),
+      newContent: z.string().describe("El nuevo codigo que se insertara ahi"),
+      rationale: z.string().describe("Por que haces este parche")
+    },
+    annotations: WR
+  }, async ({ path: p, startLine, endLine, newContent }) => {
+    const file = await safeExisting(p);
+    const content = await fs.readFile(file, "utf8");
+    const eol = content.includes("\r\n") ? "\r\n" : "\n";
+    const lines = content.split(/\r?\n/);
+    if (startLine < 1 || startLine > lines.length || endLine < startLine || endLine > lines.length) {
+      throw new Error(`Rango invalido. Archivo tiene ${lines.length} lineas.`);
     }
-    if (entries.length > 500) lines.push(`... y ${entries.length - 500} mas`);
-    return result(lines.join("\n") || "(carpeta vacia)");
-  });
-
-  server.registerTool("read_file", {
-    description: "Lee un archivo por partes.",
-    inputSchema: { path: z.string(), offset: z.number().optional(), limit: z.number().optional() },
-    annotations: RO
-  }, async ({ path: p, offset = 1, limit = 2000 }) => {
-    return result(await readTextFile(await safeExisting(p), Math.max(1, Math.floor(Number(offset) || 1)), Math.min(10000, Math.max(1, Math.floor(Number(limit) || 2000)))));
-  });
-
-  server.registerTool("read_multiple_files", {
-    description: "Lee varios archivos a la vez (max 20)",
-    inputSchema: { paths: z.array(z.string()).min(1).max(20) },
-    annotations: RO
-  }, async ({ paths }) => {
-    const parts = [];
-    for (const p of paths) {
-      try { parts.push(`===== ${p} =====\n` + await readTextFile(await safeExisting(p), 1, 800)); }
-      catch (e) { parts.push(`===== ${p} =====\nERROR: ${e.message}`); }
-    }
-    return result(parts.join("\n\n"));
+    lines.splice(startLine - 1, endLine - startLine + 1, newContent);
+    await fs.writeFile(file, lines.join(eol), "utf8");
+    return result({ success: true, path: p, linesPatched: `${startLine}-${endLine}` });
   });
 
   server.registerTool("write_file", {
-    description: "Crea o edita un archivo.",
+    description: "Crea o sobrescribe un archivo completo.",
     inputSchema: {
       path: z.string(), content: z.string(), append: z.boolean().optional(),
       rationale: z.string().describe("Razón de la modificación")
@@ -521,7 +461,7 @@ function createServer() {
     if (Buffer.byteLength(content, "utf8") > MAX_WRITE_BYTES) throw new Error("Contenido muy grande");
     const target = await safeNew(p);
     await fs.writeFile(target, content, { encoding: "utf8", flag: append ? "a" : "w" });
-    return result({ success: true, path: p, bytes: Buffer.byteLength(content, "utf8"), append });
+    return result({ success: true, path: p, append });
   });
 
   server.registerTool("edit_file", {
@@ -543,46 +483,78 @@ function createServer() {
     if (count > 1 && !replaceAll) throw new Error(`Texto aparece ${count} veces; usa replaceAll=true`);
     const updated = replaceAll ? content.split(oldN).join(newN) : content.slice(0, first) + newN + content.slice(first + oldN.length);
     await fs.writeFile(file, updated, "utf8");
-    return result({ success: true, path: p, replacements: replaceAll ? count : 1 });
-  });
-
-  server.registerTool("create_directory", {
-    description: "Crea carpeta", 
-    inputSchema: { path: z.string(), rationale: z.string().optional() }, 
-    annotations: WR
-  }, async ({ path: p }) => {
-    const target = await safeNew(p);
-    await fs.mkdir(target, { recursive: true });
     return result({ success: true, path: p });
   });
 
-  server.registerTool("move_file", {
-    description: "Mueve archivo", 
-    inputSchema: { source: z.string(), destination: z.string(), rationale: z.string().optional() }, 
-    annotations: WR
-  }, async ({ source, destination }) => {
-    const src = await safeExisting(source);
-    if (src === REAL_ROOT) throw new Error("No raiz");
-    const dest = await safeNew(destination);
-    await fs.rename(src, dest);
-    return result({ success: true, source, destination });
+  server.registerTool("search_in_files", {
+    description: "Busca texto (Grep AST-like). Devuelve lineas con contexto arriba y abajo.",
+    inputSchema: { 
+      query: z.string().min(1), path: z.string().optional(), include: z.string().optional(), 
+      regex: z.boolean().optional(), caseSensitive: z.boolean().optional(), maxResults: z.number().optional() 
+    },
+    annotations: RO
+  }, async ({ query, path: p = ".", include, regex = false, caseSensitive = false, maxResults = 100 }) => {
+    const root = await safeExisting(p);
+    maxResults = Math.min(500, Math.max(1, Math.floor(Number(maxResults) || 100)));
+    const filter = makeFileFilter(include);
+    let re = new RegExp(regex ? query : escapeRegex(query), caseSensitive ? "" : "i");
+    const source = (await fs.stat(root)).isFile() ? [{ full: root, name: path.basename(root), isDir: false }] : walkFiles(root);
+    
+    let resultText = "";
+    let matchesCount = 0;
+    
+    for await (const f of source) {
+      if (f.isDir || !filter(f.name)) continue;
+      try {
+        if ((await fs.stat(f.full)).size > 2 * 1024 * 1024) continue;
+        const buf = await fs.readFile(f.full);
+        if (buf.subarray(0, 8000).includes(0)) continue;
+        
+        const lines = buf.toString("utf8").split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          if (re.test(lines[i])) {
+            matchesCount++;
+            const start = Math.max(0, i - 2);
+            const end = Math.min(lines.length - 1, i + 2);
+            resultText += `\n[Archivo: ${rel(f.full)}]\n`;
+            for (let j = start; j <= end; j++) {
+              resultText += `${j === i ? ">>" : "  "} ${j + 1}: ${lines[j].trim()}\n`;
+            }
+            if (matchesCount >= maxResults) break;
+          }
+        }
+      } catch {}
+      if (matchesCount >= maxResults) break;
+    }
+    return result(resultText.trim() || "Sin coincidencias");
   });
 
-  server.registerTool("get_file_info", {
-    description: "Info archivo", inputSchema: { path: z.string() }, annotations: RO
-  }, async ({ path: p }) => {
-    const target = await safeExisting(p);
-    const s = await fs.stat(target);
-    return result({ path: rel(target), type: s.isDirectory() ? "directory" : "file", bytes: s.size });
+  server.registerTool("read_file", {
+    description: "Lee un archivo por partes.",
+    inputSchema: { path: z.string(), offset: z.number().optional(), limit: z.number().optional() },
+    annotations: RO
+  }, async ({ path: p, offset = 1, limit = 2000 }) => {
+    return result(await readTextFile(await safeExisting(p), Math.max(1, Math.floor(Number(offset) || 1)), Math.min(10000, Math.max(1, Math.floor(Number(limit) || 2000)))));
+  });
+
+  server.registerTool("list_files", {
+    description: "Lista archivos y carpetas", inputSchema: { path: z.string().optional() }, annotations: RO
+  }, async ({ path: p = "." }) => {
+    const dir = await safeExisting(p);
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const lines = [];
+    for (const e of entries.slice(0, 500)) {
+      if (e.isDirectory()) { lines.push(`[DIR]  ${e.name}`); continue; }
+      lines.push(`[FILE] ${e.name}`);
+    }
+    return result(lines.join("\n") || "(carpeta vacia)");
   });
 
   server.registerTool("directory_tree", {
     description: "Arbol de directorios",
-    inputSchema: { path: z.string().optional(), maxDepth: z.number().optional(), includeIgnored: z.boolean().optional() },
-    annotations: RO
-  }, async ({ path: p = ".", maxDepth = 3, includeIgnored = false }) => {
+    inputSchema: { path: z.string().optional(), maxDepth: z.number().optional() }, annotations: RO
+  }, async ({ path: p = ".", maxDepth = 3 }) => {
     const root = await safeExisting(p);
-    maxDepth = Math.min(8, Math.max(1, Math.floor(Number(maxDepth) || 3)));
     const lines = [rel(root) + "/"];
     const counter = { n: 0 };
     async function tree(dir, depth, prefix) {
@@ -591,7 +563,7 @@ function createServer() {
       entries.sort((a, b) => (b.isDirectory() - a.isDirectory()) || a.name.localeCompare(b.name));
       let shown = 0;
       for (const e of entries) {
-        if (e.isDirectory() && !includeIgnored && IGNORE_DIRS.has(e.name)) { lines.push(`${prefix}${e.name}/ (omitido)`); continue; }
+        if (e.isDirectory() && IGNORE_DIRS.has(e.name)) { lines.push(`${prefix}${e.name}/ (omitido)`); continue; }
         if (counter.n >= 1500 || shown >= 200) { lines.push(`${prefix}...`); break; }
         counter.n++; shown++;
         if (e.isDirectory()) {
@@ -604,70 +576,16 @@ function createServer() {
     return result(lines.join("\n"));
   });
 
-  server.registerTool("search_files", {
-    description: "Busca archivos por nombre", inputSchema: { query: z.string().min(1), path: z.string().optional() }, annotations: RO
-  }, async ({ query, path: p = "." }) => {
-    const root = await safeExisting(p);
-    const needle = query.toLowerCase(), matches = [];
-    for await (const f of walkFiles(root)) {
-      if (f.name.toLowerCase().includes(needle)) matches.push(rel(f.full) + (f.isDir ? "/" : ""));
-      if (matches.length >= 300) break;
-    }
-    return result(matches.length ? matches.join("\n") : "Sin coincidencias");
-  });
-
-  server.registerTool("search_in_files", {
-    description: "Grep en archivos",
-    inputSchema: { query: z.string().min(1), path: z.string().optional(), include: z.string().optional(), regex: z.boolean().optional(), caseSensitive: z.boolean().optional(), maxResults: z.number().optional() },
-    annotations: RO
-  }, async ({ query, path: p = ".", include, regex = false, caseSensitive = false, maxResults = 100 }) => {
-    const root = await safeExisting(p);
-    maxResults = Math.min(500, Math.max(1, Math.floor(Number(maxResults) || 100)));
-    const filter = makeFileFilter(include);
-    let re = new RegExp(regex ? query : escapeRegex(query), caseSensitive ? "" : "i");
-    const source = (await fs.stat(root)).isFile() ? [{ full: root, name: path.basename(root), isDir: false }] : walkFiles(root);
-    const matches = [];
-    let scanned = 0;
-    for await (const f of source) {
-      if (f.isDir || !filter(f.name)) continue;
-      try {
-        if ((await fs.stat(f.full)).size > 2 * 1024 * 1024) continue;
-        const buf = await fs.readFile(f.full);
-        if (buf.subarray(0, 8000).includes(0)) continue;
-        scanned++;
-        const lines = buf.toString("utf8").split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-          if (re.test(lines[i])) {
-            matches.push(`${rel(f.full)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
-            if (matches.length >= maxResults) break;
-          }
-        }
-      } catch {}
-      if (matches.length >= maxResults) break;
-    }
-    return result(matches.length ? matches.join("\n") : "Sin coincidencias");
-  });
-
-  server.registerTool("server_info", {
-    description: "Estado del servidor", inputSchema: {}, annotations: RO
-  }, async () => {
-    return result({
-      estado: "servidor funcionando", version: VERSION, carpeta_raiz: REAL_ROOT,
-      comandos_activados: COMMANDS_ENABLED,
-      procesos_en_segundo_plano: [...background.values()].filter(b => !b.exited).length
-    });
-  });
-
+  // --- Comandos Autonomos ---
   if (COMMANDS_ENABLED) {
     server.registerTool("run_command", {
-      description: "Ejecuta PowerShell de forma AUTONOMA. No requiere confirmacion del usuario.",
+      description: "Ejecuta PowerShell. TOTAL AUTONOMIA.",
       inputSchema: { 
         command: z.string(), cwd: z.string().optional(), timeoutSeconds: z.number().optional(),
-        rationale: z.string().describe("Explica brevemente POR QUÉ ejecutas este comando")
+        rationale: z.string().describe("Por que ejecutas esto")
       },
       annotations: CMD
     }, async ({ command, cwd = ".", timeoutSeconds = 60 }) => {
-      // BARRERA DE SEGURIDAD ELIMINADA: Autonomía Total (F-16 Mode)
       const secs = Math.min(90, Math.max(1, Math.floor(Number(timeoutSeconds) || 60)));
       const dir = await safeExisting(cwd);
       const t0 = Date.now();
@@ -686,14 +604,9 @@ function createServer() {
     });
 
     server.registerTool("start_background_command", {
-      description: "Inicia proceso largo en 2do plano de forma AUTONOMA.",
-      inputSchema: { 
-        command: z.string(), cwd: z.string().optional(),
-        rationale: z.string().describe("Explica brevemente POR QUÉ inicias este proceso") 
-      },
-      annotations: CMD
+      description: "Proceso 2do plano.",
+      inputSchema: { command: z.string(), cwd: z.string().optional(), rationale: z.string() }, annotations: CMD
     }, async ({ command, cwd = "." }) => {
-      // BARRERA DE SEGURIDAD ELIMINADA
       const dir = await safeExisting(cwd);
       const id = "bg" + (++backgroundSeq);
       const child = spawnPs(command, dir);
@@ -708,32 +621,45 @@ function createServer() {
       return result({ id, pid: child.pid, corriendo: !entry.exited, salida: tailText(entry.out, 3000) });
     });
 
-    server.registerTool("read_background_output", {
-      description: "Lee salida de proceso en 2do plano", inputSchema: { id: z.string() }, annotations: RO
-    }, async ({ id }) => {
-      const e = background.get(id);
-      if (!e) throw new Error("No existe");
-      const text = e.out.slice(e.readUpTo);
-      e.readUpTo = e.out.length;
+    server.registerTool("read_background_output", { description: "Lee proceso", inputSchema: { id: z.string() }, annotations: RO }, async ({ id }) => {
+      const e = background.get(id); if (!e) throw new Error("No existe");
+      const text = e.out.slice(e.readUpTo); e.readUpTo = e.out.length;
       return result(`[${e.exited ? "terminado" : "corriendo"}]\n` + text);
     });
 
-    server.registerTool("stop_background_command", {
-      description: "Detiene proceso", inputSchema: { id: z.string() }, annotations: CMD
-    }, async ({ id }) => {
-      const e = background.get(id);
-      if (!e) throw new Error("No existe");
-      if (!e.exited) killTree(e.child.pid);
-      return result({ id, detenido: true });
-    });
-
-    server.registerTool("list_background_commands", {
-      description: "Lista procesos", inputSchema: {}, annotations: RO
-    }, async () => {
-      const list = [...background.values()].map(b => ({ id: b.id, command: b.command.slice(0, 120), estado: b.exited ? "terminado" : "corriendo" }));
-      return result(list.length ? list : "No hay");
+    server.registerTool("stop_background_command", { description: "Detiene proceso", inputSchema: { id: z.string(), rationale: z.string() }, annotations: CMD }, async ({ id }) => {
+      const e = background.get(id); if (!e) throw new Error("No existe");
+      if (!e.exited) killTree(e.child.pid); return result({ id, detenido: true });
     });
   }
+
+  // --- Playwright Extra Tools ---
+  server.registerTool("browser_navigate", {
+    description: "Abre URL visible", inputSchema: { url: z.string(), rationale: z.string().optional() }, annotations: RO
+  }, async ({ url }) => {
+    const page = await getBrowser();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+    return result(`Navegado a ${url}`);
+  });
+  
+  server.registerTool("browser_evaluate", {
+    description: "JS en el navegador.", inputSchema: { script: z.string(), rationale: z.string().optional() }, annotations: RO
+  }, async ({ script }) => {
+    const page = await getBrowser(); return result(await page.evaluate(script));
+  });
+
+  server.registerTool("browser_click", {
+    description: "Clic en elemento.", inputSchema: { selector: z.string(), rationale: z.string() }, annotations: WR
+  }, async ({ selector }) => {
+    const page = await getBrowser(); await page.click(selector, { timeout: 10000 }); return result(`Clic en ${selector}`);
+  });
+
+  server.registerTool("browser_close", {
+    description: "Cierra navegador.", inputSchema: { rationale: z.string().optional() }, annotations: WR
+  }, async () => {
+    if (pwBrowser) { await pwBrowser.close(); pwBrowser = null; pwPage = null; return result("Navegador cerrado."); }
+    return result("No abierto.");
+  });
 
   return server;
 }
@@ -765,13 +691,12 @@ process.on("exit", () => {
 initializeRoot().then(() => {
   app.listen(PORT, "127.0.0.1", () => {
     console.log(`\n${C.magenta}${C.bold}==================================${C.reset}`);
-    console.log(`${C.magenta}${C.bold} MCP FILESYSTEM ${VERSION} (PRO) ${C.reset}`);
+    console.log(`${C.magenta}${C.bold} MCP FILESYSTEM ${VERSION} (CLAUDE-PARITY) ${C.reset}`);
     console.log(`${C.magenta}${C.bold}==================================${C.reset}`);
     console.log(`${C.cyan}Endpoint:${C.reset} http://127.0.0.1:${PORT}/mcp/<token>`);
     console.log(`${C.cyan}Carpeta:${C.reset}  ${REAL_ROOT}`);
-    console.log(`${C.cyan}Log:${C.reset}      ${LOG_FILE}`);
-    console.log(`${C.green}▶ MODO AUTÓNOMO ACTIVADO: Sin cinturones de seguridad.${C.reset}`);
-    console.log(`${C.green}▶ TRANSPARENCIA ACTIVADA: Razón de ejecución (Rationale) obligatoria.${C.reset}\n`);
+    console.log(`${C.green}▶ MODO CLAUDE CODE ACTIVADO: Auto-Onboarding, AST-Grep y Patch File.${C.reset}`);
+    console.log(`${C.green}▶ AUTONOMÍA TOTAL (Sin confirmación manual).${C.reset}\n`);
   });
 }).catch(error => {
   console.error("No se pudo iniciar:", error);
