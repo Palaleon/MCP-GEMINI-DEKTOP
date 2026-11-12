@@ -20,12 +20,12 @@ const C = {
 };
 
 // ---------------------------------------------------------------- Config
-const VERSION = "3.2.0";
+const VERSION = "3.3.0"; // Version con Autonomia Total y Rationale
 const ROOT = path.resolve(process.env.MCP_ROOT || "C:\\Users\\ASD\\Documents\\proyectos");
 const PORT = 3000;
-const MAX_READ_BYTES = 20 * 1024 * 1024;   // archivo maximo que se abre
-const MAX_WRITE_BYTES = 5 * 1024 * 1024;   // maximo por escritura
-const MAX_OUTPUT_CHARS = 80000;            // maximo de texto por respuesta
+const MAX_READ_BYTES = 20 * 1024 * 1024;   
+const MAX_WRITE_BYTES = 5 * 1024 * 1024;   
+const MAX_OUTPUT_CHARS = 80000;            
 const COMMANDS_ENABLED = process.env.MCP_COMMANDS !== "0";
 const IGNORE_DIRS = new Set([
   "node_modules", ".git", ".next", ".nuxt", "dist", "build", "out", "coverage",
@@ -51,7 +51,7 @@ function tokenOk(candidate) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-// Log de llamadas (fuera de la carpeta autorizada). Sirve para ver si Gemini llega al servidor y que pasa.
+// Log de llamadas (fuera de la carpeta autorizada).
 const LOG_FILE = path.join(os.homedir(), ".gemini-mcp.log");
 function log(msg) {
   try {
@@ -63,7 +63,10 @@ function log(msg) {
 }
 function summarizeArgs(args) {
   try {
-    return JSON.stringify(args, (k, v) => (k === "content" ? `<${String(v).length} chars>` : v)).slice(0, 300);
+    // Evitamos imprimir el contenido gigante o el rationale que ya se muestra arriba
+    const clone = { ...args };
+    delete clone.rationale; 
+    return JSON.stringify(clone, (k, v) => (k === "content" ? `<${String(v).length} chars>` : v)).slice(0, 300);
   } catch { return "?"; }
 }
 
@@ -124,7 +127,7 @@ async function safeExisting(relativePath) {
     }
   }
   const rn = path.basename(REAL_ROOT);
-  throw new Error(`La ruta "${raw}" no existe. Las rutas son relativas a la carpeta raiz "${rn}" ('.' es la raiz): usa "MCP/server.js", no "${rn}/MCP/server.js". Si dudas, usa list_files con path ".".`);
+  throw new Error(`La ruta "${raw}" no existe. Las rutas son relativas a la carpeta raiz "${rn}" ('.' es la raiz).`);
 }
 
 async function safeNew(relativePath) {
@@ -216,9 +219,8 @@ const INSTRUCTIONS = [
   "Archivos: rutas relativas a la carpeta raiz ('.' es la raiz; no antepongas el nombre de la raiz). Explora con directory_tree / list_files / search_in_files, lee con read_file (por partes con offset y limit), edita con edit_file.",
   "Comandos: run_command ejecuta PowerShell (no bash) y termina en maximo 90 s. Para instalaciones, servidores o procesos largos usa start_background_command y luego read_background_output.",
   "Un exit code 0 significa EXITO aunque haya texto en stderr (git y npm escriben avisos ahi). Los errores de estas herramientas son de la llamada, no del servidor: lee el mensaje, corrige y reintenta antes de rendirte.",
-  "Los comandos destructivos piden confirmacion: preguntale al usuario en el chat y repite con confirmDangerous=true solo si dice que si.",
-  "Si dudas del estado del servidor, llama a server_info.",
-  "NOVEDAD PRO: Cuentas con 'console_message' para hablar con el .bat, y herramientas 'browser_*' para inspeccionar UI via Playwright."
+  "NOVEDAD PRO (v3.3.0): Autonomia Total. Los comandos ya no te pediran confirmacion. Ejecuta lo que tengas que ejecutar bajo tu propio criterio.",
+  "NOVEDAD PRO (v3.3.0): Las herramientas de modificacion ahora piden un campo 'rationale'. Explica brevemente por que haces ese cambio."
 ].join("\n");
 
 function stripStderrRedirect(cmd) {
@@ -283,37 +285,15 @@ function killTree(pid) {
 
 function tailText(s, max = MAX_OUTPUT_CHARS) {
   s = s.replace(/^\uFEFF/, "");
-  return s.length > max ? "[...salida recortada, se muestra el final...]\n" + s.slice(-max) : s;
+  return s.length > max ? "[...salida recortada...]\n" + s.slice(-max) : s;
 }
 
 const background = new Map();
 let backgroundSeq = 0;
 
-const DANGEROUS = [
-  [/\bRemove-Item\b[^\n;|]*-Recurse|\brm\s+(-\w*r|-Recurse)|\b(rd|rmdir)\s+\/s|\bdel\s+[^\n]*\/s/i, "borrado recursivo de archivos o carpetas"],
-  [/\bgit\s+reset\s+--hard|\bgit\s+clean\b[^\n]*\s-\w*[fdx]|\bgit\s+push\b[^\n]*(--force\b|\s-f\b)|\bgit\s+branch\b[^\n]*\s-D\b|\bgit\s+checkout\s+(--\s+)?\.(\s|$)|\bgit\s+restore\b[^\n]*\s\.(\s|$)|\bgit\s+stash\s+(drop|clear)/i, "operacion de git que descarta cambios o reescribe historial"],
-  [/\b(Format-Volume|Clear-Disk|diskpart)\b|\bformat\s+[a-z]:/i, "formatear discos"],
-  [/\b(Stop-Computer|Restart-Computer|shutdown)\b/i, "apagar o reiniciar la PC"],
-  [/\b(taskkill|Stop-Process)\b/i, "terminar procesos (podria cerrar el propio servidor MCP)"],
-  [/\breg(\.exe)?\s+(delete|add|import)\b|\bSet-ExecutionPolicy\b/i, "cambiar el registro o politicas del sistema"],
-  [/\b(iex|Invoke-Expression)\b/i, "ejecutar texto dinamico o descargado"],
-  [/\b(npm|pnpm|yarn)\s+(publish|unpublish)\b|\b(winget|choco|scoop)\s+(uninstall|remove)\b|\bnpm\s+(uninstall|remove)\s+(-g|--global)/i, "publicar o desinstalar software"],
-  [/\.gemini-mcp|id_rsa|[\\\/]\.ssh\b/i, "acceder a credenciales del sistema o del propio MCP"]
-];
-
-function dangerReason(cmd) {
-  for (const [re, why] of DANGEROUS) if (re.test(cmd)) return why;
-  return null;
-}
-
-function dangerMessage(why) {
-  return "[REQUIERE CONFIRMACION DEL USUARIO] NO se ejecuto nada. El comando parece destructivo o sensible (" + why + ").\n" +
-    "Pidele permiso al usuario EN EL CHAT mostrandole el comando exacto. Si dice que si, vuelve a llamar a la herramienta con el mismo comando y confirmDangerous=true. Si dice que no, no lo ejecutes.";
-}
-
 function hintFor({ command, code, timedOut, secs, out, err }) {
   const all = out + "\n" + err;
-  if (timedOut) return `El comando tardo mas de ${secs}s y se detuvo. Si es algo largo (install, build, servidor), usa start_background_command.`;
+  if (timedOut) return `El comando tardo mas de ${secs}s y se detuvo. Si es algo largo, usa start_background_command.`;
   if (/git\s+commit/i.test(command || "") && /nothing to commit|nada para hacer commit/i.test(all)) return "No habia cambios para commitear. No es un fallo real.";
   if (/pathspec .* did not match|did not match any file/i.test(all)) return "Git no encontro esa rama, archivo o ruta.";
   if (/index\.lock/i.test(all)) return "Hay un .git/index.lock colgado. Confirma que no corre otro git y borra el archivo.";
@@ -365,11 +345,8 @@ let pwPage = null;
 
 async function getBrowser() {
   if (!pw) {
-    try {
-      pw = require("playwright");
-    } catch (e) {
-      throw new Error("Playwright no esta instalado en este directorio. Ejecuta 'npm install playwright' primero.");
-    }
+    try { pw = require("playwright"); } 
+    catch (e) { throw new Error("Playwright no esta instalado."); }
   }
   if (!pwBrowser) {
     console.log(`\n${C.cyan}${C.bold}▶ INICIANDO NAVEGADOR PLAYWRIGHT (Visible)...${C.reset}\n`);
@@ -389,9 +366,12 @@ function createServer() {
     const t0 = Date.now();
     const args = config.inputSchema && Object.keys(config.inputSchema).length ? a[0] : {};
     
-    // Log a Consola del Usuario a Color (excepto si es el propio console_message)
+    // Log Interceptor con Rationale
     if (name !== "console_message") {
       console.log(`\n${C.cyan}▶ LLAMANDO HERRAMIENTA:${C.reset} ${C.bold}${name}${C.reset}`);
+      if (args.rationale) {
+        console.log(`${C.yellow}💡 Razón: ${args.rationale}${C.reset}`);
+      }
       console.log(`${C.gray}  Params: ${summarizeArgs(args)}${C.reset}`);
     }
 
@@ -417,13 +397,13 @@ function createServer() {
 
   // --- Herramienta de Interfaz y Razonamiento ---
   server.registerTool("console_message", {
-    description: "Imprime tu razonamiento y el estado de tus tareas en la consola del usuario a todo color. Llamala antes de pasos largos o para mostrar tu plan.",
+    description: "Imprime tu razonamiento y el estado de tus tareas en la consola del usuario a todo color.",
     inputSchema: {
       thought: z.string().describe("Tu pensamiento actual o lo que estas haciendo"),
       tasks: z.array(z.object({
         task: z.string(),
         status: z.enum(["completada", "en proceso", "pendiente"])
-      })).optional().describe("Lista de tareas (opcional)")
+      })).optional()
     },
     annotations: RO
   }, async ({ thought, tasks }) => {
@@ -447,7 +427,7 @@ function createServer() {
   // --- Playwright Tools ---
   server.registerTool("browser_navigate", {
     description: "Abre una URL en el navegador visible (Playwright).",
-    inputSchema: { url: z.string() },
+    inputSchema: { url: z.string(), rationale: z.string().optional() },
     annotations: RO
   }, async ({ url }) => {
     const page = await getBrowser();
@@ -456,8 +436,8 @@ function createServer() {
   });
 
   server.registerTool("browser_evaluate", {
-    description: "Ejecuta JS en el navegador y devuelve el resultado (ej. para extraer texto o info del DOM).",
-    inputSchema: { script: z.string() },
+    description: "Ejecuta JS en el navegador.",
+    inputSchema: { script: z.string(), rationale: z.string().optional() },
     annotations: RO
   }, async ({ script }) => {
     const page = await getBrowser();
@@ -466,8 +446,8 @@ function createServer() {
   });
 
   server.registerTool("browser_click", {
-    description: "Hace clic en un elemento del navegador usando un selector CSS.",
-    inputSchema: { selector: z.string() },
+    description: "Hace clic en un elemento.",
+    inputSchema: { selector: z.string(), rationale: z.string().describe("Razón de la interacción") },
     annotations: WR
   }, async ({ selector }) => {
     const page = await getBrowser();
@@ -476,8 +456,8 @@ function createServer() {
   });
 
   server.registerTool("browser_close", {
-    description: "Cierra el navegador de Playwright.",
-    inputSchema: {},
+    description: "Cierra el navegador.",
+    inputSchema: { rationale: z.string().optional() },
     annotations: WR
   }, async () => {
     if (pwBrowser) {
@@ -492,7 +472,7 @@ function createServer() {
 
   // --- Archivos ---
   server.registerTool("list_files", {
-    description: "Lista archivos y carpetas de un directorio",
+    description: "Lista archivos y carpetas",
     inputSchema: { path: z.string().optional() },
     annotations: RO
   }, async ({ path: p = "." }) => {
@@ -510,19 +490,15 @@ function createServer() {
   });
 
   server.registerTool("read_file", {
-    description: "Lee un archivo de texto por partes.",
-    inputSchema: {
-      path: z.string(),
-      offset: z.number().optional().describe("Linea inicial (desde 1)"),
-      limit: z.number().optional().describe("Cantidad de lineas (por defecto 2000)")
-    },
+    description: "Lee un archivo por partes.",
+    inputSchema: { path: z.string(), offset: z.number().optional(), limit: z.number().optional() },
     annotations: RO
   }, async ({ path: p, offset = 1, limit = 2000 }) => {
     return result(await readTextFile(await safeExisting(p), Math.max(1, Math.floor(Number(offset) || 1)), Math.min(10000, Math.max(1, Math.floor(Number(limit) || 2000)))));
   });
 
   server.registerTool("read_multiple_files", {
-    description: "Lee varios archivos de texto a la vez (max 20)",
+    description: "Lee varios archivos a la vez (max 20)",
     inputSchema: { paths: z.array(z.string()).min(1).max(20) },
     annotations: RO
   }, async ({ paths }) => {
@@ -537,7 +513,8 @@ function createServer() {
   server.registerTool("write_file", {
     description: "Crea o edita un archivo.",
     inputSchema: {
-      path: z.string(), content: z.string(), append: z.boolean().optional()
+      path: z.string(), content: z.string(), append: z.boolean().optional(),
+      rationale: z.string().describe("Razón de la modificación")
     },
     annotations: WR
   }, async ({ path: p, content, append = false }) => {
@@ -549,7 +526,10 @@ function createServer() {
 
   server.registerTool("edit_file", {
     description: "Reemplaza texto exacto.",
-    inputSchema: { path: z.string(), oldText: z.string().min(1), newText: z.string(), replaceAll: z.boolean().optional() },
+    inputSchema: { 
+      path: z.string(), oldText: z.string().min(1), newText: z.string(), replaceAll: z.boolean().optional(),
+      rationale: z.string().describe("Razón de la modificación")
+    },
     annotations: WR
   }, async ({ path: p, oldText, newText, replaceAll = false }) => {
     const file = await safeExisting(p);
@@ -567,7 +547,9 @@ function createServer() {
   });
 
   server.registerTool("create_directory", {
-    description: "Crea carpeta", inputSchema: { path: z.string() }, annotations: WR
+    description: "Crea carpeta", 
+    inputSchema: { path: z.string(), rationale: z.string().optional() }, 
+    annotations: WR
   }, async ({ path: p }) => {
     const target = await safeNew(p);
     await fs.mkdir(target, { recursive: true });
@@ -575,7 +557,9 @@ function createServer() {
   });
 
   server.registerTool("move_file", {
-    description: "Mueve archivo", inputSchema: { source: z.string(), destination: z.string() }, annotations: WR
+    description: "Mueve archivo", 
+    inputSchema: { source: z.string(), destination: z.string(), rationale: z.string().optional() }, 
+    annotations: WR
   }, async ({ source, destination }) => {
     const src = await safeExisting(source);
     if (src === REAL_ROOT) throw new Error("No raiz");
@@ -676,12 +660,14 @@ function createServer() {
 
   if (COMMANDS_ENABLED) {
     server.registerTool("run_command", {
-      description: "Ejecuta PowerShell",
-      inputSchema: { command: z.string(), cwd: z.string().optional(), timeoutSeconds: z.number().optional(), confirmDangerous: z.boolean().optional() },
+      description: "Ejecuta PowerShell de forma AUTONOMA. No requiere confirmacion del usuario.",
+      inputSchema: { 
+        command: z.string(), cwd: z.string().optional(), timeoutSeconds: z.number().optional(),
+        rationale: z.string().describe("Explica brevemente POR QUÉ ejecutas este comando")
+      },
       annotations: CMD
-    }, async ({ command, cwd = ".", timeoutSeconds = 60, confirmDangerous = false }) => {
-      const why = dangerReason(command);
-      if (why && !confirmDangerous) return result(dangerMessage(why));
+    }, async ({ command, cwd = ".", timeoutSeconds = 60 }) => {
+      // BARRERA DE SEGURIDAD ELIMINADA: Autonomía Total (F-16 Mode)
       const secs = Math.min(90, Math.max(1, Math.floor(Number(timeoutSeconds) || 60)));
       const dir = await safeExisting(cwd);
       const t0 = Date.now();
@@ -700,12 +686,14 @@ function createServer() {
     });
 
     server.registerTool("start_background_command", {
-      description: "Inicia proceso largo en 2do plano",
-      inputSchema: { command: z.string(), cwd: z.string().optional(), confirmDangerous: z.boolean().optional() },
+      description: "Inicia proceso largo en 2do plano de forma AUTONOMA.",
+      inputSchema: { 
+        command: z.string(), cwd: z.string().optional(),
+        rationale: z.string().describe("Explica brevemente POR QUÉ inicias este proceso") 
+      },
       annotations: CMD
-    }, async ({ command, cwd = ".", confirmDangerous = false }) => {
-      const why = dangerReason(command);
-      if (why && !confirmDangerous) return result(dangerMessage(why));
+    }, async ({ command, cwd = "." }) => {
+      // BARRERA DE SEGURIDAD ELIMINADA
       const dir = await safeExisting(cwd);
       const id = "bg" + (++backgroundSeq);
       const child = spawnPs(command, dir);
@@ -782,7 +770,8 @@ initializeRoot().then(() => {
     console.log(`${C.cyan}Endpoint:${C.reset} http://127.0.0.1:${PORT}/mcp/<token>`);
     console.log(`${C.cyan}Carpeta:${C.reset}  ${REAL_ROOT}`);
     console.log(`${C.cyan}Log:${C.reset}      ${LOG_FILE}`);
-    console.log(`${C.green}▶ MODO PRO ACTIVADO: Consola ANSI y Ojos Playwright listos.${C.reset}\n`);
+    console.log(`${C.green}▶ MODO AUTÓNOMO ACTIVADO: Sin cinturones de seguridad.${C.reset}`);
+    console.log(`${C.green}▶ TRANSPARENCIA ACTIVADA: Razón de ejecución (Rationale) obligatoria.${C.reset}\n`);
   });
 }).catch(error => {
   console.error("No se pudo iniciar:", error);
