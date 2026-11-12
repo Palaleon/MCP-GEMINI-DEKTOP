@@ -17,7 +17,7 @@ const C = {
   blue: "\x1b[34m", magenta: "\x1b[35m", cyan: "\x1b[36m", white: "\x1b[37m", gray: "\x1b[90m"
 };
 
-const VERSION = "3.5.0";
+const VERSION = "3.6.0"; // Dynamic Task Engine
 const ROOT = path.resolve(process.env.MCP_ROOT || "C:\\Users\\ASD\\Documents\\proyectos");
 const PORT = 41337;
 const MAX_READ_BYTES = 20 * 1024 * 1024;
@@ -190,12 +190,12 @@ const STARTED = Date.now();
 
 const INSTRUCTIONS = [
   "ERES UN AGENTE AUTÓNOMO CON ACCESO REAL A LA PC DEL USUARIO (Windows).",
-  "Usa las herramientas directamente. NUNCA digas que no tienes acceso sin intentarlo primero.",
-  "Reglas Principales:",
-  "1. AL INICIAR UN CHAT NUEVO: Llama SIEMPRE a 'get_project_context' para orientarte.",
-  "2. CHAT vs CONSOLA: Usa 'console_message' para tu paso a paso, no el chat.",
-  "3. LIMPIEZA DE SESION: Si sospechas que estas en un contexto cruzado o ves procesos raros, llama a 'reset_mcp_session' para limpiar cache y procesos zombie.",
-  "4. COMANDOS AUTONOMOS: Usa 'run_command' con autonomia total. No necesitas pedir permiso."
+  "1. AL INICIAR: Llama a 'get_project_context' para orientarte.",
+  "2. GESTION DE TAREAS DINAMICA (v3.6.0):",
+  "   - Tienes una memoria persistente en el servidor. Cada tarea debe tener un 'id' (ej. T1, T2).",
+  "   - Usa 'console_message' con 'action: create' para crear tareas al inicio de un plan.",
+  "   - Usa 'console_message' con 'action: update' repetidamente para cambiar el status a 'completada' y añadir logs en 'sub_steps'.",
+  "3. COMANDOS AUTONOMOS: Usa 'run_command' libremente. No necesitas pedir permiso."
 ].join("\n");
 
 function stripStderrRedirect(cmd) {
@@ -258,6 +258,42 @@ function tailText(s, max = MAX_OUTPUT_CHARS) {
 const background = new Map();
 let backgroundSeq = 0;
 
+// ==========================================
+// ESTADO EN MEMORIA DE TAREAS Y CONSOLA (v3.6.0)
+// ==========================================
+const taskState = new Map();
+
+function printTasks(thought) {
+  console.clear();
+  console.log(`\n${C.magenta}${C.bold}======================================${C.reset}`);
+  console.log(`${C.magenta}${C.bold}🤖 GEMINI: CENTRO DE MANDO Y TAREAS${C.reset}`);
+  console.log(`${C.magenta}${C.bold}======================================${C.reset}`);
+  
+  if (taskState.size > 0) {
+    for (const [id, t] of taskState.entries()) {
+      let icon = "[ ]", color = C.white;
+      if (t.status === "completada") { icon = "[✔]"; color = C.green; } 
+      else if (t.status === "en proceso") { icon = "[➤]"; color = C.yellow; }
+      else if (t.status === "error") { icon = "[✖]"; color = C.red; }
+      
+      console.log(`${color}${icon} [${id}] ${t.title} - (${t.status})${C.reset}`);
+      
+      if (t.sub_steps && t.sub_steps.length > 0) {
+        for (const step of t.sub_steps) {
+           console.log(`      ${C.gray}└─ ${step}${C.reset}`);
+        }
+      }
+    }
+    console.log(`${C.magenta}${C.bold}--------------------------------------${C.reset}`);
+  }
+  
+  if (thought) {
+    console.log(`${C.cyan}💭 Pensamiento: ${C.white}${thought}${C.reset}`);
+  }
+  console.log(`${C.magenta}${C.bold}======================================${C.reset}\n`);
+}
+
+
 function formatRun({ command, code, timedOut, ms, cwd, out, err, secs }) {
   const status = timedOut ? "TIMEOUT" : code === 0 ? "OK" : "ERROR";
   const o = tailText(out).trim();
@@ -313,28 +349,46 @@ function createServer() {
   });
 
   server.registerTool("console_message", {
-    description: "Imprime tu razonamiento y tareas en la consola del usuario a todo color.",
-    inputSchema: { thought: z.string(), tasks: z.array(z.object({ task: z.string(), status: z.enum(["completada", "en proceso", "pendiente"]) })).optional() },
+    description: "Actualiza tu estado de tareas. Usa 'create' para iniciar, y 'update' repetidamente para avanzar.",
+    inputSchema: { 
+        action: z.enum(["create", "update"]).describe("'create' borra la memoria. 'update' actualiza por ID."),
+        thought: z.string().optional(), 
+        tasks: z.array(z.object({ 
+            id: z.string(), title: z.string().optional(),
+            status: z.enum(["completada", "en proceso", "pendiente", "error"]).optional(),
+            sub_steps: z.array(z.string()).optional()
+        })).optional() 
+    },
     annotations: RO
-  }, async ({ thought, tasks }) => {
-    console.log(`\n${C.magenta}${C.bold}======================================${C.reset}`);
-    console.log(`${C.magenta}${C.bold}🤖 GEMINI: ESTADO DE TAREAS Y RAZONAMIENTO${C.reset}`);
-    console.log(`${C.magenta}${C.bold}======================================${C.reset}`);
-    if (tasks && tasks.length) {
-      for (const t of tasks) {
-        let icon = "[ ]", color = C.white;
-        if (t.status === "completada") { icon = "[✔]"; color = C.green; } else if (t.status === "en proceso") { icon = "[➤]"; color = C.yellow; }
-        console.log(`${color}${icon} ${t.task} - (${t.status})${C.reset}`);
-      }
-      console.log(`${C.magenta}${C.bold}--------------------------------------${C.reset}`);
+  }, async ({ action = "create", thought, tasks }) => {
+    
+    if (action === "create") {
+        taskState.clear();
     }
-    console.log(`${C.cyan}💭 Pensamiento: ${C.white}${thought}${C.reset}`);
-    console.log(`${C.magenta}${C.bold}======================================${C.reset}\n`);
-    return result("Mensaje mostrado.");
+    
+    if (tasks && tasks.length > 0) {
+        for (const t of tasks) {
+            if (action === "create" || !taskState.has(t.id)) {
+                taskState.set(t.id, {
+                    title: t.title || "Tarea sin titulo",
+                    status: t.status || "pendiente",
+                    sub_steps: t.sub_steps || []
+                });
+            } else {
+                const existing = taskState.get(t.id);
+                if (t.title) existing.title = t.title;
+                if (t.status) existing.status = t.status;
+                if (t.sub_steps) existing.sub_steps = t.sub_steps;
+            }
+        }
+    }
+    
+    printTasks(thought);
+    return result("Tablero de tareas actualizado.");
   });
 
   server.registerTool("reset_mcp_session", {
-    description: "Limpia el contexto de una sesion anterior. Elimina procesos colgados y borra la cache local de logs.",
+    description: "Limpia la sesion, tareas en memoria, procesos y logs.",
     inputSchema: { rationale: z.string() }, annotations: WR
   }, async () => {
     let killed = 0;
@@ -343,13 +397,14 @@ function createServer() {
       background.delete(id);
     }
     backgroundSeq = 0;
+    taskState.clear();
     try { if (fsSync.existsSync(LOG_FILE)) fsSync.unlinkSync(LOG_FILE); } catch(e) {}
-    console.log(`\n${C.green}${C.bold}🧹 SESION RESETEADA POR LA IA (${killed} procesos detenidos, cache limpio).${C.reset}\n`);
-    return result(`Sesion reiniciada exitosamente. ${killed} procesos muertos. Logs de cache limpios.`);
+    console.log(`\n${C.green}${C.bold}🧹 SESION RESETEADA POR LA IA (${killed} procesos detenidos).${C.reset}\n`);
+    return result(`Sesion reiniciada exitosamente.`);
   });
 
   server.registerTool("get_project_context", {
-    description: "Llamala al iniciar. Extrae estructura y reglas para que entiendas el proyecto.",
+    description: "Extrae reglas para que entiendas el proyecto.",
     inputSchema: { rationale: z.string().optional() }, annotations: RO
   }, async () => {
     let ctx = "============================\nCONTEXTO GLOBAL\n============================\n\n";
@@ -403,7 +458,7 @@ function createServer() {
   });
 
   server.registerTool("search_in_files", {
-    description: "Busca texto (Grep AST-like).",
+    description: "Busca texto.",
     inputSchema: { query: z.string().min(1), path: z.string().optional(), include: z.string().optional(), regex: z.boolean().optional(), caseSensitive: z.boolean().optional(), maxResults: z.number().optional() }, annotations: RO
   }, async ({ query, path: p = ".", include, regex = false, caseSensitive = false, maxResults = 100 }) => {
     const root = await safeExisting(p); maxResults = Math.min(500, Math.max(1, Math.floor(Number(maxResults) || 100)));
@@ -461,7 +516,7 @@ function createServer() {
 
   if (COMMANDS_ENABLED) {
     server.registerTool("run_command", {
-      description: "Ejecuta PowerShell. TOTAL AUTONOMIA.",
+      description: "Ejecuta PowerShell.",
       inputSchema: { command: z.string(), cwd: z.string().optional(), timeoutSeconds: z.number().optional(), rationale: z.string() }, annotations: CMD
     }, async ({ command, cwd = ".", timeoutSeconds = 60 }) => {
       const secs = Math.min(90, Math.max(1, Math.floor(Number(timeoutSeconds) || 60))), dir = await safeExisting(cwd), t0 = Date.now();
@@ -539,6 +594,7 @@ initializeRoot().then(() => {
     console.log(`${C.magenta}${C.bold}==================================${C.reset}`);
     console.log(`${C.cyan}Endpoint:${C.reset} http://127.0.0.1:${PORT}/mcp/<token>`);
     console.log(`${C.cyan}Carpeta:${C.reset}  ${REAL_ROOT}`);
-    console.log(`${C.green}▶ HERRAMIENTA RESET CACHE: 'reset_mcp_session' inyectada.${C.reset}\n`);
+    console.log(`${C.green}▶ HERRAMIENTA RESET CACHE: 'reset_mcp_session' inyectada.${C.reset}`);
+    console.log(`${C.green}▶ MOTOR DINAMICO TAREAS ACTIVADO (console.clear).${C.reset}\n`);
   });
 }).catch(error => { console.error("Fallo:", error); process.exit(1); });
