@@ -8,6 +8,7 @@ $cf = Join-Path $dir "cloudflared.exe"
 $script:srv = $null
 $script:tun = $null
 $script:url = $null
+$PORT = 41337
 
 function Log($m) {
   try { Add-Content -Path $launchLog -Value ("{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $m) } catch {}
@@ -23,7 +24,7 @@ function Start-Server {
   for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 500
     try {
-      $h = Invoke-RestMethod "http://127.0.0.1:3000/health" -TimeoutSec 2
+      $h = Invoke-RestMethod "http://127.0.0.1:$PORT/health" -TimeoutSec 2
       if ($h.status -eq "ok") { return $true }
     } catch {}
   }
@@ -32,7 +33,7 @@ function Start-Server {
 
 function Start-Tunnel {
   if (Test-Path $tunnelLog) { Remove-Item $tunnelLog -Force -ErrorAction SilentlyContinue }
-  $script:tun = Start-Process $cf -ArgumentList "tunnel","--url","http://127.0.0.1:3000","--no-autoupdate","--logfile",$tunnelLog -WindowStyle Minimized -PassThru
+  $script:tun = Start-Process $cf -ArgumentList "tunnel","--url","http://127.0.0.1:$PORT","--no-autoupdate","--logfile",$tunnelLog -WindowStyle Minimized -PassThru
   for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
     $txt = Get-Content $tunnelLog -Raw -ErrorAction SilentlyContinue
@@ -69,17 +70,15 @@ Write-Host ""
 Write-Host "=== MCP para Gemini ===" -ForegroundColor Cyan
 Log "=== inicio del lanzador ==="
 
-# 1) Limpiar restos de ejecuciones anteriores
 Get-Process cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $cf } | ForEach-Object { Kill-Tree $_.Id }
-Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Kill-Tree $_.OwningProcess }
+Get-NetTCPConnection -LocalPort $PORT -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Kill-Tree $_.OwningProcess }
 
-# 2) Servidor y tunel
 if (-not (Start-Server)) {
   Write-Host "ERROR: el servidor no arranco. Revisa server.js" -ForegroundColor Red
   Log "ERROR: servidor no arranco"
   Read-Host "Enter para salir"; exit 1
 }
-Write-Host "[OK] Servidor MCP corriendo en 127.0.0.1:3000" -ForegroundColor Green
+Write-Host "[OK] Servidor MCP corriendo en 127.0.0.1:$PORT" -ForegroundColor Green
 if (-not (Start-Tunnel)) {
   Write-Host "ERROR: no se obtuvo URL del tunel. Mira tunnel.log" -ForegroundColor Red
   Log "ERROR: tunel sin URL"
@@ -89,7 +88,6 @@ if (-not (Start-Tunnel)) {
 Write-Host "[OK] Tunel creado: $($script:url)" -ForegroundColor Green
 Publish-Url "URL PARA PEGAR EN GEMINI (ya copiada al portapapeles):"
 
-# 3) Vigilar: si el servidor o el tunel se caen, se reinician solos
 $interactive = $true
 try { $null = [Console]::KeyAvailable } catch { $interactive = $false }
 
@@ -97,9 +95,10 @@ if (-not $interactive) {
   Write-Host "Deja esta ventana abierta. Presiona Enter para APAGAR todo." -ForegroundColor Gray
   Read-Host | Out-Null
 } else {
-  Write-Host "Vigilando servidor y tunel (se reinician solos si se caen)." -ForegroundColor Gray
+  Write-Host "Vigilando servidor y tunel (Ping anti-inactividad cada 4m)." -ForegroundColor Gray
   Write-Host "Deja esta ventana abierta. Presiona Enter para APAGAR todo." -ForegroundColor Gray
   $stop = $false
+  $lastPing = Get-Date
   while (-not $stop) {
     for ($i = 0; $i -lt 5; $i++) {
       Start-Sleep -Seconds 1
@@ -109,6 +108,15 @@ if (-not $interactive) {
       }
     }
     if ($stop) { break }
+    
+    if (((Get-Date) - $lastPing).TotalMinutes -ge 4) {
+        $lastPing = Get-Date
+        try { 
+            $null = Invoke-RestMethod "$script:url/health" -TimeoutSec 5 -ErrorAction SilentlyContinue
+            Log "Ping keep-alive enviado al tunel."
+        } catch {}
+    }
+
     if ($script:srv.HasExited) {
       Write-Host "[!] El servidor se cayo. Reiniciando..." -ForegroundColor Yellow
       Log "servidor caido, reiniciando"
@@ -125,7 +133,12 @@ if (-not $interactive) {
   }
 }
 
+try {
+    Remove-Item (Join-Path $env:USERPROFILE ".gemini-mcp.log") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $env:USERPROFILE ".gemini-mcp-launcher.log") -Force -ErrorAction SilentlyContinue
+} catch {}
+
 Kill-Tree $script:tun.Id
 Kill-Tree $script:srv.Id
 Log "apagado por el usuario"
-Write-Host "Apagado." -ForegroundColor Gray
+Write-Host "Apagado y cache local de logs limpiado." -ForegroundColor Gray
